@@ -33,8 +33,6 @@ public class Minimizer {
     private TreeSet<String> duplicateEntries = new TreeSet<>();
     private HashMap<String, String> mergedEntries = new HashMap<>();
 
-    private String dest;
-
     /**
      * Remove classes which are not used.
      *
@@ -43,49 +41,49 @@ public class Minimizer {
      * @throws IOException File exceptions.
      */
     public void shrink(String verboseFilePath, String destJarPath) throws IOException {
-        this.dest = destJarPath;
-        parseVerbose(Files.readAllLines(Paths.get(verboseFilePath)));
+        parseVerboseClassInfo(verboseFilePath);
         System.out.println(usedClasses.size() + " classes are used in the following jars:");
         usedJars.forEach(x -> System.out.println(x));
 
-        findDuplicates();
+        findDuplicateEntries();
         System.out.println("Following files will be merged:");
         duplicateEntries.forEach(x -> System.out.println(x));
 
-        shrinkJars();
+        addUsedEntriesInAllJars(destJarPath);
         System.out.println("\nGenerated minimized jar file " + destJarPath);
     }
 
     /**
      * Parse verbose information and generate the used classes and jars list.
      *
-     * @param lines
-     * @throws IOException
+     * @param verboseFilePath Full path name of the output file of verbose:class.
+     * @throws IOException File exceptions.
      */
-    private void parseVerbose(List<String> lines) throws IOException {
+    private void parseVerboseClassInfo(String verboseFilePath) throws IOException {
         usedJars.clear();
         usedClasses.clear();
+        List<String> lines = Files.readAllLines(Paths.get(verboseFilePath));
         lines.forEach(line -> {
-            int p1 = line.indexOf("from file");
-            if (p1 < 0) return;
-            String jarName = line.substring(p1 + 11, line.length() - 1);
+            int pos = line.indexOf("from file");
+            if (pos < 0) return;
+            String jarName = line.substring(pos + 11, line.length() - 1);
             if (jarName.contains("/jre") || jarName.contains("\\jre") || !jarName.endsWith(".jar"))
                 return;
             usedJars.add(jarName);
-            String className = line.substring(8, p1 - 1);
+            String className = line.substring(8, pos - 1);
             usedClasses.add(className.replace('.', '/') + ".class");
         });
     }
 
     /**
-     * Find entries whose name occurred more than once.
+     * Find entries whose name occurred more than once in all jars.
      *
-     * @throws IOException
+     * @throws IOException File exceptions.
      */
-    private void findDuplicates() throws IOException {
+    private void findDuplicateEntries() throws IOException {
         TreeSet<String> entries = new TreeSet<>();
-        for (String src : usedJars) {
-            ZipFile zipFile = new ZipFile(src);
+        for (String usedJar : usedJars) {
+            ZipFile zipFile = new ZipFile(usedJar);
             Enumeration enumeration = zipFile.entries();
             while (enumeration.hasMoreElements()) {
                 ZipEntry inEntry = (ZipEntry) enumeration.nextElement();
@@ -102,15 +100,16 @@ public class Minimizer {
     /**
      * Shrink all jars in the class path and being used.
      *
-     * @throws IOException
+     * @param destJarPath     Full path name of the destination minimized jar file.
+     * @throws IOException File exceptions.
      */
-    private void shrinkJars() throws IOException {
-        ZipOutputStream zipOut = new ZipOutputStream(new FileOutputStream(dest), Charset.forName("UTF8"));
+    private void addUsedEntriesInAllJars(String destJarPath) throws IOException {
+        ZipOutputStream zipOut = new ZipOutputStream(new FileOutputStream(destJarPath), Charset.forName("UTF8"));
         zipOut.setLevel(9);
         zipOut.setMethod(ZipOutputStream.DEFLATED);
-        for (String src : usedJars) {
+        for (String usedJar : usedJars) {
             try {
-                shrinkJar(src, zipOut);
+                addUsedClassesInJar(usedJar, zipOut);
             } catch (FileNotFoundException e) {
                 e.printStackTrace();
             }
@@ -127,12 +126,12 @@ public class Minimizer {
     /**
      * Shrink one jar.
      *
-     * @param src  Source jar file path name.
-     * @param zout The destination zip file's out stream.
+     * @param usedJar  Source jar file path name.
+     * @param zipOut The destination zip file's out stream.
      * @throws IOException
      */
-    private void shrinkJar(String src, ZipOutputStream zout) throws IOException {
-        ZipFile zipFile = new ZipFile(src);
+    private void addUsedClassesInJar(String usedJar, ZipOutputStream zipOut) throws IOException {
+        ZipFile zipFile = new ZipFile(usedJar);
         Enumeration enumeration = zipFile.entries();
         while (enumeration.hasMoreElements()) {
             ZipEntry inEntry = (ZipEntry) enumeration.nextElement();
@@ -144,25 +143,25 @@ public class Minimizer {
                 continue;
             }
 
-            InputStream zin = zipFile.getInputStream(inEntry);
+            InputStream zipIn = zipFile.getInputStream(inEntry);
 
             if (!duplicateEntries.contains(path)) {
                 ZipEntry outEntry = new ZipEntry(path);
-                zout.putNextEntry(outEntry);
+                zipOut.putNextEntry(outEntry);
                 byte[] data = new byte[1024];
                 int length;
-                while ((length = zin.read(data)) > 0) {
-                    zout.write(data, 0, length);
+                while ((length = zipIn.read(data)) > 0) {
+                    zipOut.write(data, 0, length);
                 }
             } else {
                 //merge entries (expected to be text files, otherwise will be broken)
-                String text = read(zin, (int) inEntry.getSize());
+                String text = read(zipIn, (int) inEntry.getSize());
                 if (!mergedEntries.containsKey(path))
                     mergedEntries.put(path, text);
                 else
                     mergedEntries.put(path, mergedEntries.get(path) + "\n" + text);
             }
-            zin.close();
+            zipIn.close();
         }
     }
 
@@ -170,15 +169,15 @@ public class Minimizer {
      * Append merged entries (expected to be text files).
      *
      * @param item
-     * @param zout
+     * @param zipOut
      * @throws IOException
      */
-    private void appendMergedEntry(Map.Entry<String, String> item, ZipOutputStream zout) throws IOException {
+    private void appendMergedEntry(Map.Entry<String, String> item, ZipOutputStream zipOut) throws IOException {
         ZipEntry outEntry = new ZipEntry(item.getKey());
-        zout.putNextEntry(outEntry);
-        zout.write(item.getValue().getBytes());
+        zipOut.putNextEntry(outEntry);
+        zipOut.write(item.getValue().getBytes());
         outEntry.setSize(item.getValue().getBytes().length);
-        zout.closeEntry();
+        zipOut.closeEntry();
     }
 
     /**
@@ -191,7 +190,7 @@ public class Minimizer {
      */
     private static String read(InputStream in, int size) throws IOException {
         byte[] buf = new byte[size];
-        int r = in.read(buf);
+        in.read(buf);
         return new String(buf);
     }
 }
